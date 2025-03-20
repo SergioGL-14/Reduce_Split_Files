@@ -1,6 +1,6 @@
 ## Descripción
 
-**File Reducer** es una herramienta práctica y automática que reduce el tamaño de archivos **PDF** e **imágenes (JPG, PNG, JPEG)** por debajo de 1MB, ideal para entornos donde existen restricciones de tamaño en la subida de archivos.
+**File Reducer** es una herramienta práctica y automática que reduce el tamaño de archivos **PDF** utilizando PDF24 y **imágenes (JPG, PNG, JPEG)** por debajo de 1MB, ideal para entornos donde existen restricciones de tamaño en la subida de archivos.
 
 - Comprime imágenes con ajustes automáticos de calidad y resolución.
 - Comprime archivos PDF reduciendo imágenes internas y optimizando contenido.
