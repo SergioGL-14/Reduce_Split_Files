@@ -23,8 +23,8 @@ if PDF24_PATH is None:
     print("Error: No se encontró PDF24. Asegúrate de que esté instalado.")
     sys.exit(1)
 
-# Comprimir imágenes con Pillow
-def compress_image(input_path, output_path, quality=40, max_size=(1024,768), threshold=1*1024*1024):
+# Compresión de imágenes con Pillow
+def compress_image(input_path, output_path, quality=85, max_size=(1024,768), threshold=1*1024*1024):
     try:
         if not os.path.exists(input_path):
             print(f"Error: El archivo {input_path} no existe.")
@@ -32,13 +32,24 @@ def compress_image(input_path, output_path, quality=40, max_size=(1024,768), thr
 
         img = Image.open(input_path)
         img.thumbnail(max_size, Image.Resampling.LANCZOS)
-        img.save(output_path, quality=quality, optimize=True)
 
-        while os.path.getsize(output_path) > threshold and quality > 10:
-            quality -= 10
-            img.save(output_path, quality=quality, optimize=True)
-        
-        print(f"Imagen comprimida: {output_path} ({os.path.getsize(output_path)/1024:.2f} KB)")
+        current_quality = quality
+        step = 5
+        min_quality = 30
+
+        while current_quality >= min_quality:
+            img.save(output_path, quality=current_quality, optimize=True)
+            current_size = os.path.getsize(output_path)
+
+            print(f"🔍 Intentando calidad {current_quality}% → {current_size / 1024:.2f} KB")
+            if current_size <= threshold:
+                print(f"✅ Imagen comprimida: {output_path} ({current_size / 1024:.2f} KB)")
+                break
+
+            current_quality -= step
+
+        if current_quality < min_quality and os.path.getsize(output_path) > threshold:
+            print(f"⚠️ No se pudo reducir suficientemente {output_path} sin bajar de {min_quality}% de calidad.")
 
     except UnidentifiedImageError:
         print(f"Error: No se pudo abrir la imagen {input_path}. Formato no válido o archivo corrupto.")
@@ -46,6 +57,32 @@ def compress_image(input_path, output_path, quality=40, max_size=(1024,768), thr
         print(f"Error: No se puede acceder a {input_path}. Puede estar en uso por otro programa.")
     except Exception as e:
         print(f"Error desconocido al comprimir imagen: {e}")
+
+# Función para convertir imágenes .heic y .jfif a PNG y comprimir si es necesario
+def convert_and_compress(input_path, threshold=1*1024*1024, quality=40, max_size=(1024,768)):
+    base, _ = os.path.splitext(input_path)
+    output_file = f"{base}.png"
+    try:
+        img = Image.open(input_path)
+        # Convertir a RGB en caso de que sea necesario
+        img = img.convert('RGB')
+        img.thumbnail(max_size, Image.Resampling.LANCZOS)
+        img.save(output_file, format='PNG', optimize=True)
+        print(f"Imagen convertida a PNG: {output_file} ({os.path.getsize(output_file)/1024:.2f} KB)")
+        
+        # Si supera el umbral, se aplica la compresión
+        if os.path.getsize(output_file) > threshold:
+            compress_image(output_file, output_file, quality=quality, max_size=max_size, threshold=threshold)
+        
+        return output_file
+
+    except UnidentifiedImageError:
+        print(f"Error: No se pudo abrir la imagen {input_path}. Formato no válido o archivo corrupto.")
+    except PermissionError:
+        print(f"Error: No se puede acceder a {input_path}. Puede estar en uso por otro programa.")
+    except Exception as e:
+        print(f"Error desconocido al convertir {input_path} a PNG: {e}")
+    return None
 
 # Comprimir PDF usando PDF24
 def compress_pdf(input_pdf, output_pdf, dpi=144, image_quality=75):
@@ -60,7 +97,7 @@ def compress_pdf(input_pdf, output_pdf, dpi=144, image_quality=75):
 
         shutil.copy2(input_pdf, temp_pdf)
 
-        # 🔹 Ejecutar PDF24 forzando el nombre de salida
+        # Ejecutar PDF24 forzando el nombre de salida
         subprocess.run([
             PDF24_PATH,
             "-compress",
@@ -70,7 +107,7 @@ def compress_pdf(input_pdf, output_pdf, dpi=144, image_quality=75):
             temp_pdf
         ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-        # Verificar si el archivo comprimido existe y renombrarlo si es necesario
+        # Verificar si el archivo comprimido existe y mostrar información
         if os.path.exists(compressed_pdf):
             print(f"PDF comprimido: {compressed_pdf} ({os.path.getsize(compressed_pdf)/1024:.2f} KB)")
 
@@ -122,13 +159,13 @@ def split_pdf(input_pdf, output_pdf1, output_pdf2):
 # Gestionar compresión de PDFs
 def handle_pdf_compression(file_path, threshold=1*1024*1024):
     base, ext = os.path.splitext(file_path)
-    compressed_file = f"{base}_compressed.pdf"
+    compressed_file = f"{base}_REDUCIDO.pdf"
 
     compress_pdf(file_path, compressed_file)
 
     if os.path.exists(compressed_file) and os.path.getsize(compressed_file) > threshold:
-        part1 = f"{base}_compressed_part1.pdf"
-        part2 = f"{base}_compressed_part2.pdf"
+        part1 = f"{base}_REDUCIDO_part1.pdf"
+        part2 = f"{base}_REDUCIDO_part2.pdf"
 
         split_pdf(compressed_file, part1, part2)
 
@@ -151,12 +188,13 @@ def process_file(file_path, threshold=1*1024*1024):
         ext = ext.lower()
 
         if ext in ['.jpg', '.jpeg', '.png']:
-            compressed_file = f"{base}_compressed{ext}"
+            compressed_file = f"{base}_REDUCIDO{ext}"
             compress_image(file_path, compressed_file, threshold=threshold)
-
         elif ext == '.pdf':
             handle_pdf_compression(file_path, threshold)
-
+        elif ext in ['.heic', '.jfif']:
+            # Convertir a PNG y comprimir si es necesario
+            convert_and_compress(file_path, threshold=threshold)
         else:
             print(f"Formato no soportado: {file_path}")
 
@@ -173,7 +211,7 @@ def main():
             root.withdraw()
             files = filedialog.askopenfilenames(
                 title="Selecciona archivos para comprimir (PDF/Imágenes)",
-                filetypes=[("PDF e Imágenes", "*.pdf;*.jpg;*.jpeg;*.png")]
+                filetypes=[("PDF e Imágenes", "*.pdf;*.jpg;*.jpeg;*.png;*.heic;*.jfif")]
             )
 
         if not files:
@@ -183,7 +221,7 @@ def main():
         for file in files:
             process_file(file)
 
-        print("Proceso terminado. Comprueba los archivos comprimidos.")
+        print("Proceso terminado. Comprueba los archivos procesados.")
 
     except Exception as e:
         print(f"Error crítico en la ejecución del script: {e}")
