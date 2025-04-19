@@ -1,230 +1,291 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 import os
 import sys
+import logging
 import subprocess
 import shutil
+from pathlib import Path
 from PIL import Image, UnidentifiedImageError
 from PyPDF2 import PdfReader, PdfWriter
 import tkinter as tk
-from tkinter import filedialog, messagebox
+from tkinter import filedialog, messagebox, ttk
 
-# Buscar PDF24 automáticamente
-def find_pdf24():
-    possible_paths = [
-        r"C:\Program Files\PDF24\pdf24-DocTool.exe",
-        r"C:\Program Files (x86)\PDF24\pdf24-DocTool.exe"
-    ]
-    for path in possible_paths:
-        if os.path.exists(path):
+# =========================
+# CONFIGURACIÓN GLOBAL
+# =========================
+PDF24_EXECUTABLES = [
+    Path(r"C:\Program Files\PDF24\pdf24-DocTool.exe"),
+    Path(r"C:\Program Files (x86)\PDF24\pdf24-DocTool.exe"),
+]
+DEFAULT_QUALITY = 85
+MIN_QUALITY = 30
+QUALITY_STEP = 5
+DEFAULT_MAX_SIZE = (1024, 768)
+SIZE_THRESHOLD = 1 * 1024 * 1024  # 1 MB
+PDF_DPI = 144
+PDF_IMAGE_QUALITY = 75
+
+# =========================
+# LOGGER
+# =========================
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%H:%M:%S"
+)
+logger = logging.getLogger(__name__)
+
+# =========================
+# UTILIDADES
+# =========================
+def find_pdf24_executable() -> Path:
+    """Busca la ruta de PDF24 en el sistema Windows."""
+    for path in PDF24_EXECUTABLES:
+        if path.exists():
+            logger.debug(f"PDF24 encontrado en: {path}")
             return path
     return None
 
-PDF24_PATH = find_pdf24()
+PDF24_PATH = find_pdf24_executable()
 if PDF24_PATH is None:
-    print("Error: No se encontró PDF24. Asegúrate de que esté instalado.")
+    logger.error("No se encontró PDF24. Instálalo o ajusta PDF24_EXECUTABLES.")
     sys.exit(1)
 
-# Compresión de imágenes con Pillow
-def compress_image(input_path, output_path, quality=85, max_size=(1024,768), threshold=1*1024*1024):
-    try:
-        if not os.path.exists(input_path):
-            print(f"Error: El archivo {input_path} no existe.")
-            return
+def is_supported_image(ext: str) -> bool:
+    """Comprueba si la extensión es de imagen compatible."""
+    return ext in {'.jpg', '.jpeg', '.png', '.heic', '.jfif'}
 
+# =========================
+# BLOQUE: COMPRESIÓN DE IMÁGENES
+# =========================
+def compress_image(
+    input_path: Path,
+    output_path: Path,
+    quality: int = DEFAULT_QUALITY,
+    max_size: tuple = DEFAULT_MAX_SIZE,
+    threshold: int = SIZE_THRESHOLD
+) -> bool:
+    """
+    Comprime una imagen JPEG/PNG hasta que quede por debajo de threshold.
+    Devuelve True si tuvo éxito, False en caso contrario.
+    """
+    try:
         img = Image.open(input_path)
         img.thumbnail(max_size, Image.Resampling.LANCZOS)
-
         current_quality = quality
-        step = 5
-        min_quality = 30
 
-        while current_quality >= min_quality:
+        while current_quality >= MIN_QUALITY:
             img.save(output_path, quality=current_quality, optimize=True)
-            current_size = os.path.getsize(output_path)
+            size_kb = output_path.stat().st_size / 1024
+            logger.debug(f"Intento calidad {current_quality}% → {size_kb:.2f} KB")
+            if output_path.stat().st_size <= threshold:
+                logger.info(f"✅ Imagen comprimida: {output_path} ({size_kb:.2f} KB)")
+                return True
+            current_quality -= QUALITY_STEP
 
-            print(f"🔍 Intentando calidad {current_quality}% → {current_size / 1024:.2f} KB")
-            if current_size <= threshold:
-                print(f"✅ Imagen comprimida: {output_path} ({current_size / 1024:.2f} KB)")
-                break
-
-            current_quality -= step
-
-        if current_quality < min_quality and os.path.getsize(output_path) > threshold:
-            print(f"⚠️ No se pudo reducir suficientemente {output_path} sin bajar de {min_quality}% de calidad.")
+        logger.warning(
+            f"No se pudo reducir {output_path.name} sin bajar de {MIN_QUALITY}%"
+        )
+        return False
 
     except UnidentifiedImageError:
-        print(f"Error: No se pudo abrir la imagen {input_path}. Formato no válido o archivo corrupto.")
+        logger.error(f"Formato no válido o corrupto: {input_path}")
     except PermissionError:
-        print(f"Error: No se puede acceder a {input_path}. Puede estar en uso por otro programa.")
+        logger.error(f"Acceso denegado: {input_path}")
     except Exception as e:
-        print(f"Error desconocido al comprimir imagen: {e}")
+        logger.exception(f"Error al comprimir imagen: {e}")
+    return False
 
-# Función para convertir imágenes .heic y .jfif a PNG y comprimir si es necesario
-def convert_and_compress(input_path, threshold=1*1024*1024, quality=40, max_size=(1024,768)):
-    base, _ = os.path.splitext(input_path)
-    output_file = f"{base}.png"
+def convert_heic_jfif_to_png(
+    input_path: Path,
+    max_size: tuple = DEFAULT_MAX_SIZE,
+    threshold: int = SIZE_THRESHOLD,
+    quality: int = 40
+) -> Path:
+    """
+    Convierte HEIC/JFIF a PNG, luego comprime si supera threshold.
+    Devuelve la ruta del archivo PNG o None si falló.
+    """
+    output_path = input_path.with_suffix('.png')
     try:
-        img = Image.open(input_path)
-        # Convertir a RGB en caso de que sea necesario
-        img = img.convert('RGB')
+        img = Image.open(input_path).convert('RGB')
         img.thumbnail(max_size, Image.Resampling.LANCZOS)
-        img.save(output_file, format='PNG', optimize=True)
-        print(f"Imagen convertida a PNG: {output_file} ({os.path.getsize(output_file)/1024:.2f} KB)")
-        
-        # Si supera el umbral, se aplica la compresión
-        if os.path.getsize(output_file) > threshold:
-            compress_image(output_file, output_file, quality=quality, max_size=max_size, threshold=threshold)
-        
-        return output_file
+        img.save(output_path, format='PNG', optimize=True)
+        logger.info(f"Convertido a PNG: {output_path} ({output_path.stat().st_size/1024:.2f} KB)")
+
+        if output_path.stat().st_size > threshold:
+            compress_image(output_path, output_path, quality=quality, max_size=max_size, threshold=threshold)
+        return output_path
 
     except UnidentifiedImageError:
-        print(f"Error: No se pudo abrir la imagen {input_path}. Formato no válido o archivo corrupto.")
+        logger.error(f"No se pudo abrir {input_path}")
     except PermissionError:
-        print(f"Error: No se puede acceder a {input_path}. Puede estar en uso por otro programa.")
+        logger.error(f"Acceso denegado: {input_path}")
     except Exception as e:
-        print(f"Error desconocido al convertir {input_path} a PNG: {e}")
+        logger.exception(f"Error al convertir {input_path} a PNG: {e}")
     return None
 
-# Comprimir PDF usando PDF24
-def compress_pdf(input_pdf, output_pdf, dpi=144, image_quality=75):
+# =========================
+# BLOQUE: COMPRESIÓN DE PDFs
+# =========================
+def compress_pdf(
+    input_pdf: Path,
+    output_pdf: Path,
+    dpi: int = PDF_DPI,
+    image_quality: int = PDF_IMAGE_QUALITY
+) -> bool:
+    """
+    Comprime un PDF usando PDF24. Devuelve True si tuvo éxito.
+    """
     try:
-        if not os.path.exists(input_pdf):
-            print(f"Error: El archivo {input_pdf} no existe.")
-            return
-
-        output_dir = os.path.dirname(output_pdf)
-        temp_pdf = os.path.join(output_dir, f"temp_{os.path.basename(input_pdf)}")
-        compressed_pdf = os.path.join(output_dir, f"{os.path.basename(output_pdf)}")  # Salida esperada
-
+        temp_pdf = output_pdf.parent / f"temp_{input_pdf.name}"
         shutil.copy2(input_pdf, temp_pdf)
 
-        # Ejecutar PDF24 forzando el nombre de salida
         subprocess.run([
-            PDF24_PATH,
+            str(PDF24_PATH),
             "-compress",
             "-dpi", str(dpi),
             "-imageQuality", str(image_quality),
-            "-outputFile", compressed_pdf,
-            temp_pdf
+            "-outputFile", str(output_pdf),
+            str(temp_pdf)
         ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-        # Verificar si el archivo comprimido existe y mostrar información
-        if os.path.exists(compressed_pdf):
-            print(f"PDF comprimido: {compressed_pdf} ({os.path.getsize(compressed_pdf)/1024:.2f} KB)")
-
-        # Eliminar el archivo temporal original
-        if os.path.exists(temp_pdf):
-            os.remove(temp_pdf)
-            print(f"🗑️ Eliminado archivo temporal: {temp_pdf}")
+        if output_pdf.exists():
+            size_kb = output_pdf.stat().st_size / 1024
+            logger.info(f"✅ PDF comprimido: {output_pdf} ({size_kb:.2f} KB)")
+            temp_pdf.unlink(missing_ok=True)
+            return True
 
     except subprocess.CalledProcessError:
-        print("Error: No se pudo ejecutar PDF24. Verifica la instalación.")
+        logger.error("Fallo al ejecutar PDF24.")
     except PermissionError:
-        print(f"Error: No se puede acceder a {input_pdf}. Puede estar en uso por otro programa.")
+        logger.error(f"Acceso denegado: {input_pdf}")
     except Exception as e:
-        print(f"Error desconocido al comprimir PDF: {e}")
+        logger.exception(f"Error al comprimir PDF: {e}")
+    return False
 
-# Dividir PDF en dos partes
-def split_pdf(input_pdf, output_pdf1, output_pdf2):
+def split_pdf_in_half(input_pdf: Path, out1: Path, out2: Path) -> bool:
+    """
+    Divide un PDF en dos partes iguales. Devuelve True si tuvo éxito.
+    """
     try:
-        if not os.path.exists(input_pdf):
-            print(f"Error: El archivo {input_pdf} no existe.")
-            return
+        reader = PdfReader(str(input_pdf))
+        pages = reader.pages
+        if len(pages) < 2:
+            logger.warning(f"{input_pdf.name} tiene < 2 páginas; no se divide.")
+            return False
 
-        reader = PdfReader(input_pdf)
-        num_pages = len(reader.pages)
-        if num_pages < 2:
-            print(f"Advertencia: El PDF {input_pdf} tiene solo una página, no se dividirá.")
-            return
+        mid = len(pages) // 2
+        w1, w2 = PdfWriter(), PdfWriter()
+        for i, page in enumerate(pages):
+            (w1 if i < mid else w2).add_page(page)
 
-        mid_point = num_pages // 2
-        writer1 = PdfWriter()
-        writer2 = PdfWriter()
+        for writer, path in [(w1, out1), (w2, out2)]:
+            with open(path, 'wb') as f:
+                writer.write(f)
+            logger.info(f"PDF dividido: {path}")
 
-        for i in range(num_pages):
-            if i < mid_point:
-                writer1.add_page(reader.pages[i])
-            else:
-                writer2.add_page(reader.pages[i])
-
-        with open(output_pdf1, 'wb') as f:
-            writer1.write(f)
-        with open(output_pdf2, 'wb') as f:
-            writer2.write(f)
-
-        print(f"PDF dividido en {output_pdf1} y {output_pdf2}")
+        return True
 
     except Exception as e:
-        print(f"Error desconocido al dividir PDF: {e}")
+        logger.exception(f"Error al dividir PDF: {e}")
+    return False
 
-# Gestionar compresión de PDFs
-def handle_pdf_compression(file_path, threshold=1*1024*1024):
-    base, ext = os.path.splitext(file_path)
-    compressed_file = f"{base}_REDUCIDO.pdf"
+def handle_pdf_file(file_path: Path, threshold: int = SIZE_THRESHOLD):
+    """
+    Orquesta la compresión y, si hace falta, división de un PDF grande.
+    """
+    base = file_path.with_suffix('')
+    reduced = base.with_name(base.name + "_REDUCIDO.pdf")
 
-    compress_pdf(file_path, compressed_file)
+    if compress_pdf(file_path, reduced):
+        if reduced.stat().st_size > threshold:
+            p1 = base.with_name(base.name + "_REDUCIDO_part1.pdf")
+            p2 = base.with_name(base.name + "_REDUCIDO_part2.pdf")
+            if split_pdf_in_half(reduced, p1, p2):
+                for part in (p1, p2):
+                    if part.stat().st_size > threshold:
+                        compress_pdf(part, part, dpi=100, image_quality=60)
+            reduced.unlink(missing_ok=True)
 
-    if os.path.exists(compressed_file) and os.path.getsize(compressed_file) > threshold:
-        part1 = f"{base}_REDUCIDO_part1.pdf"
-        part2 = f"{base}_REDUCIDO_part2.pdf"
+# =========================
+# BLOQUE: PROCESAMIENTO GENERAL
+# =========================
+def process_file(file_path: Path, threshold: int = SIZE_THRESHOLD):
+    """
+    Detecta tipo de archivo y lo procesa adecuadamente.
+    """
+    ext = file_path.suffix.lower()
+    logger.info(f"Procesando: {file_path.name}")
 
-        split_pdf(compressed_file, part1, part2)
+    if ext in ['.jpg', '.jpeg', '.png']:
+        dest = file_path.with_name(file_path.stem + "_REDUCIDO" + ext)
+        compress_image(file_path, dest, threshold=threshold)
 
-        for part in [part1, part2]:
-            if os.path.exists(part) and os.path.getsize(part) > threshold:
-                compress_pdf(part, part, dpi=100, image_quality=60)
+    elif ext in ['.heic', '.jfif']:
+        convert_heic_jfif_to_png(file_path, threshold=threshold)
 
-        # Eliminar el archivo comprimido si se ha dividido
-        if os.path.exists(compressed_file):
-            os.remove(compressed_file)
+    elif ext == '.pdf':
+        handle_pdf_file(file_path, threshold)
 
-# Gestionar archivos según extensión
-def process_file(file_path, threshold=1*1024*1024):
-    try:
-        if not os.path.isfile(file_path):
-            print(f"Error: {file_path} no es un archivo válido.")
-            return
+    else:
+        logger.warning(f"Formato no soportado: {file_path.name}")
 
-        base, ext = os.path.splitext(file_path)
-        ext = ext.lower()
+# =========================
+# BLOQUE: INTERFAZ GRÁFICA
+# =========================
+class CompressionApp(tk.Tk):
+    def __init__(self):
+        super().__init__()
+        self.title("🗜️ Compresor de Archivos")
+        self.geometry("500x300")
+        self.configure(padx=20, pady=20)
+        # Estilo ttk
+        style = ttk.Style(self)
+        style.theme_use("clam")
+        style.configure("TButton", padding=6, font=("Segoe UI", 10))
+        style.configure("TLabel", font=("Segoe UI", 10))
+        self._create_widgets()
 
-        if ext in ['.jpg', '.jpeg', '.png']:
-            compressed_file = f"{base}_REDUCIDO{ext}"
-            compress_image(file_path, compressed_file, threshold=threshold)
-        elif ext == '.pdf':
-            handle_pdf_compression(file_path, threshold)
-        elif ext in ['.heic', '.jfif']:
-            # Convertir a PNG y comprimir si es necesario
-            convert_and_compress(file_path, threshold=threshold)
-        else:
-            print(f"Formato no soportado: {file_path}")
+    def _create_widgets(self):
+        ttk.Label(self, text="Selecciona archivos para comprimir:").pack(pady=(0, 10))
+        ttk.Button(self, text="Abrir Explorador", command=self.select_files).pack()
+        self.progress = ttk.Progressbar(self, orient="horizontal", length=400, mode="determinate")
+        self.progress.pack(pady=20)
 
-    except Exception as e:
-        print(f"Error desconocido al procesar archivo {file_path}: {e}")
-
-# Función principal con interfaz opcional
-def main():
-    try:
-        if len(sys.argv) > 1:
-            files = [f for f in sys.argv[1:] if os.path.isfile(f)]
-        else:
-            root = tk.Tk()
-            root.withdraw()
-            files = filedialog.askopenfilenames(
-                title="Selecciona archivos para comprimir (PDF/Imágenes)",
-                filetypes=[("PDF e Imágenes", "*.pdf;*.jpg;*.jpeg;*.png;*.heic;*.jfif")]
-            )
-
+    def select_files(self):
+        files = filedialog.askopenfilenames(
+            title="Archivos (PDF/Imágenes)",
+            filetypes=[("PDF e Imágenes", "*.pdf;*.jpg;*.jpeg;*.png;*.heic;*.jfif")]
+        )
         if not files:
-            messagebox.showinfo("No se seleccionaron archivos", "No se han seleccionado archivos para procesar.")
+            messagebox.showinfo("Info", "No se seleccionaron archivos.")
             return
+        self._run_processing(files)
 
-        for file in files:
+    def _run_processing(self, files):
+        total = len(files)
+        self.progress["maximum"] = total
+        for idx, f in enumerate(files, 1):
+            process_file(Path(f))
+            self.progress["value"] = idx
+            self.update_idletasks()
+        messagebox.showinfo("¡Listo!", "Todos los archivos han sido procesados.")
+
+# =========================
+# PUNTO DE ENTRADA
+# =========================
+def main():
+    if len(sys.argv) > 1:
+        inputs = [Path(p) for p in sys.argv[1:] if Path(p).is_file()]
+        for file in inputs:
             process_file(file)
-
-        print("Proceso terminado. Comprueba los archivos procesados.")
-
-    except Exception as e:
-        print(f"Error crítico en la ejecución del script: {e}")
+        logger.info("Procesamiento por línea de comandos finalizado.")
+    else:
+        app = CompressionApp()
+        app.mainloop()
 
 if __name__ == "__main__":
     main()
